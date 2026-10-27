@@ -42,7 +42,12 @@
   .k-leader { color: var(--leader); } .k-fault { color: #ffa198; } .k-heal { color: #7ee787; }
   .logbar { display: flex; height: 8px; width: 140px; background: var(--bg); border-radius: 3px; overflow: hidden; border: 1px solid var(--line); }
   .logbar span { display: block; height: 100%; }
-  .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 8px; align-items: center; }
+  /* Keep the diagram within the screen height so the controls stay visible. */
+  .ringwrap { position: relative; width: min(100%, calc(58vh * 520 / 380)); margin: 0 auto; }
+  #flow { position: absolute; inset: 0; pointer-events: none; }
+  .msgkey { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
+  label.toggle { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; color: var(--text); }
   .scroll { overflow-x: auto; }
   .side { display: grid; gap: 16px; align-content: start; }
 </style>
@@ -56,7 +61,20 @@
 <main>
   <section class="panel">
     <h2>Cluster</h2>
-    <svg id="ring" viewBox="0 0 520 380" role="img" aria-label="Cluster diagram"></svg>
+    <div class="ringwrap">
+      <svg id="ring" viewBox="0 0 520 380" role="img" aria-label="Cluster diagram"></svg>
+      <svg id="flow" viewBox="0 0 520 380" aria-hidden="true"></svg>
+    </div>
+    <div class="legend" aria-label="Message types">
+      <label class="toggle"><input type="checkbox" id="showMsgs" checked> show messages</label>
+      <span><i class="msgkey" style="background:#f2cc60;width:6px;height:6px"></i> heartbeat</span>
+      <span><i class="msgkey" style="background:#3fb950"></i> append entries</span>
+      <span><i class="msgkey" style="border:2px solid #f0883e;box-sizing:border-box"></i> pre-vote</span>
+      <span><i class="msgkey" style="background:#f0883e"></i> vote</span>
+      <span><i class="msgkey" style="background:#a371f7"></i> snapshot</span>
+      <span><b style="color:#f85149">✕</b> lost</span>
+      <span><i class="msgkey" style="border:2px solid #f85149;box-sizing:border-box"></i> rejected</span>
+    </div>
     <div class="legend">
       <span><i class="dot" style="background:var(--leader)"></i> leader</span>
       <span><i class="dot" style="background:var(--candidate)"></i> candidate</span>
@@ -120,7 +138,7 @@ function fmtMicros(us) {
 function drawRing(s) {
   const svg = $('ring'); svg.replaceChildren();
   const n = s.nodes.length, cx = 260, cy = 185, R = 135;
-  const pos = s.nodes.map((_, i) => {
+  const pos = nodePos = s.nodes.map((_, i) => {
     const a = -Math.PI / 2 + i * 2 * Math.PI / n;
     return [cx + R * Math.cos(a), cy + R * Math.sin(a)];
   });
@@ -203,11 +221,83 @@ function drawEvents(evts) {
   $('events').replaceChildren(...items);
 }
 
+// ---- message animation ----
+// Real RPCs take microseconds, so each dot is a slowed-down picture of one
+// (or a burst of identical) message(s) between two nodes.
+let nodePos = [];
+let msgCursor = -1;
+const particles = [];
+const STYLE = {
+  heartbeat: { color: '#f2cc60', r: 3, dur: 520 },
+  append:    { color: '#3fb950', r: 4.5, dur: 560 },
+  prevote:   { color: '#f0883e', r: 5, dur: 650, hollow: true },
+  vote:      { color: '#f0883e', r: 5.5, dur: 650 },
+  snapshot:  { color: '#a371f7', r: 8, dur: 900 },
+};
+const NODE_R = 34;
+
+function spawnMessages(msgs) {
+  if (!$('showMsgs').checked || !nodePos.length) return;
+  // Collapse bursts: one dot per (from, to, kind) per poll, keeping the
+  // most interesting outcome (lost > rejected > ok).
+  const rank = { ok: 0, rejected: 1, lost: 2 };
+  const groups = new Map();
+  for (const m of msgs) {
+    const k = m.from + '>' + m.to + ':' + m.kind;
+    const g = groups.get(k);
+    if (!g || rank[m.outcome] > rank[g.outcome]) groups.set(k, m);
+  }
+  const now = performance.now();
+  for (const m of groups.values()) {
+    if (particles.length > 160) break;
+    const st = STYLE[m.kind] || STYLE.heartbeat;
+    particles.push({ m, st, start: now + Math.random() * 220 });
+  }
+}
+
+function drawParticles(now) {
+  const svg = $('flow');
+  svg.replaceChildren();
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i], a = nodePos[p.m.from], b = nodePos[p.m.to];
+    if (!a || !b) { particles.splice(i, 1); continue; }
+    let t = (now - p.start) / p.st.dur;
+    if (t < 0) continue;
+    const lost = p.m.outcome === 'lost', rejected = p.m.outcome === 'rejected';
+    const end = lost ? 0.55 : 1;           // lost messages die mid-flight
+    const life = end + 0.35;                // then linger briefly
+    if (t > life) { particles.splice(i, 1); continue; }
+    // Travel from the edge of one circle to the edge of the other.
+    const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy);
+    const ux = dx / len, uy = dy / len;
+    const sx = a[0] + ux * NODE_R, sy = a[1] + uy * NODE_R;
+    const span = len - 2 * NODE_R;
+    const k = Math.min(t, end);
+    const ease = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+    const x = sx + ux * span * ease, y = sy + uy * span * ease;
+    const fade = t > end ? 1 - (t - end) / 0.35 : 1;
+    if (lost && t > end) {
+      const d = 5;
+      svg.append(el('path', { d: `M${x - d} ${y - d} L${x + d} ${y + d} M${x + d} ${y - d} L${x - d} ${y + d}`,
+        stroke: '#f85149', 'stroke-width': 2.2, 'stroke-linecap': 'round', opacity: fade }));
+      continue;
+    }
+    svg.append(el('circle', p.st.hollow
+      ? { cx: x, cy: y, r: p.st.r, fill: '#0d1117', stroke: p.st.color, 'stroke-width': 2, opacity: fade }
+      : { cx: x, cy: y, r: p.st.r, fill: p.st.color, opacity: fade * 0.95 }));
+    if (rejected && t > end) {
+      svg.append(el('circle', { cx: x, cy: y, r: p.st.r + 4 + (t - end) * 20, fill: 'none', stroke: '#f85149', 'stroke-width': 1.5, opacity: fade }));
+    }
+  }
+}
+
 let dash = 0;
 async function tick() {
   try {
-    const s = await (await fetch('/api/state')).json();
+    const s = await (await fetch('/api/state?since=' + Math.max(msgCursor, 0))).json();
     drawRing(s); drawRows(s); drawSpark(s.opsHistory); drawEvents(s.events);
+    if (msgCursor >= 0) spawnMessages(s.messages || []);
+    msgCursor = s.msgSeq;
     const last4 = s.opsHistory.slice(-4).reduce((a, b) => a + b, 0);
     $('rate').textContent = last4;
     $('p50').textContent = fmtMicros(s.p50Micros);
@@ -224,6 +314,7 @@ tick();
 // Animate heartbeat links.
 (function anim() {
   dash = (dash - 0.6) % 12;
+  drawParticles(performance.now());
   document.querySelectorAll('line.hb').forEach(l => l.setAttribute('stroke-dashoffset', dash));
   requestAnimationFrame(anim);
 })();

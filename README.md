@@ -8,7 +8,9 @@ A fault-tolerant, **linearizable** key-value store built from scratch on the Raf
 
 Kill the leader, cut the network in half, or pull the power on every node at once. The cluster elects a new leader, keeps serving, and never returns a stale or lost write. Every one of those claims is checked automatically: a chaos tester injects faults while clients hammer the store, then proves the recorded history is linearizable.
 
-![kvraft visualizer: the leader n4 was just crashed and n2 took over in term 4](docs/visualizer.jpg)
+![kvraft visualizer: a leader crash, a network split with no majority, and recovery, with every Raft message animated](docs/demo.gif)
+
+*The live visualizer (`go run ./cmd/kvsim`). Every dot is a real Raft message: heartbeats, log entries, pre-votes, votes and snapshots. A red ✕ is a message lost to a crash or partition.*
 
 ## Highlights
 
@@ -16,7 +18,7 @@ Kill the leader, cut the network in half, or pull the power on every node at onc
 - **Crash-safe storage.** A segmented write-ahead log with CRC32-C framing, torn-write recovery and **group commit**: fsync runs outside the Raft lock, so many writes share one fsync and a slow disk never stalls heartbeats.
 - **Exactly-once writes.** Clients tag requests with `(clientID, seq)`, so a retried `put` or `cas` never applies twice, even across leader changes.
 - **Verified with a linearizability checker.** Randomized fault injection (crashes, partitions, message loss, delay, full power outages) with every history checked by [porcupine](https://github.com/anishathalye/porcupine). The tests also prove the checker catches deliberately broken builds.
-- **Live visualizer.** Watch elections happen, crash nodes and split the network from your browser.
+- **Live visualizer.** Watch every Raft message fly between nodes, then crash nodes and split the network from your browser.
 - **Zero runtime dependencies.** The standard library only; porcupine is used by the tests.
 
 ## Try it in 30 seconds

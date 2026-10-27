@@ -26,7 +26,69 @@ type Network struct {
 	dropRate float64
 	maxDelay time.Duration
 
-	rpcs uint64
+	rpcs   uint64
+	tracer func(Message)
+}
+
+// Message describes one RPC for observers such as the visualizer.
+type Message struct {
+	From, To int
+	// Kind is "prevote", "vote", "heartbeat" (no entries), "append" or "snapshot".
+	Kind string
+	// Outcome is "ok" or "rejected" (the receiver said no: vote denied, log
+	// mismatch, stale term), or "lost" (partitioned, crashed or dropped).
+	Outcome string
+}
+
+// SetTracer registers f to be called for every RPC once its fate is known.
+// f must be fast; it runs on the sender's goroutine.
+func (n *Network) SetTracer(f func(Message)) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.tracer = f
+}
+
+func (n *Network) trace(from, to int, args, reply any, delivered bool) {
+	n.mu.Lock()
+	f := n.tracer
+	n.mu.Unlock()
+	if f == nil {
+		return
+	}
+	m := Message{From: from, To: to, Outcome: "lost"}
+	switch a := args.(type) {
+	case *raft.RequestVoteArgs:
+		m.Kind = "vote"
+		if a.PreVote {
+			m.Kind = "prevote"
+		}
+		if delivered {
+			m.Outcome = "rejected"
+			if r, ok := reply.(*raft.RequestVoteReply); ok && r.VoteGranted {
+				m.Outcome = "ok"
+			}
+		}
+	case *raft.AppendEntriesArgs:
+		m.Kind = "heartbeat"
+		if len(a.Entries) > 0 {
+			m.Kind = "append"
+		}
+		if delivered {
+			m.Outcome = "rejected"
+			if r, ok := reply.(*raft.AppendEntriesReply); ok && r.Success {
+				m.Outcome = "ok"
+			}
+		}
+	case *raft.InstallSnapshotArgs:
+		m.Kind = "snapshot"
+		if delivered {
+			m.Outcome = "ok"
+			if r, ok := reply.(*raft.InstallSnapshotReply); ok && r.Term > a.Term {
+				m.Outcome = "rejected"
+			}
+		}
+	}
+	f(m)
 }
 
 func New(seed int64) *Network {
@@ -154,6 +216,16 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // call delivers one RPC from -> to, applying partitions and faults to both
 // the request and the reply.
 func call[A any, R any](ctx context.Context, n *Network, from, to int, args A, fn func(raft.Handler, A) (R, error)) (R, error) {
+	r, err := deliver(ctx, n, from, to, args, fn)
+	// A cancelled call means the sender stopped caring (for example a
+	// ReadIndex round that already heard from a majority), not a lost message.
+	if !errors.Is(err, context.Canceled) {
+		n.trace(from, to, args, r, err == nil)
+	}
+	return r, err
+}
+
+func deliver[A any, R any](ctx context.Context, n *Network, from, to int, args A, fn func(raft.Handler, A) (R, error)) (R, error) {
 	var zero R
 	n.mu.Lock()
 	h, ok := n.handlers[to]

@@ -15,12 +15,14 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/zeiado/kvraft/raft"
 	"github.com/zeiado/kvraft/sim"
+	"github.com/zeiado/kvraft/transport/memnet"
 )
 
 //go:embed web
@@ -32,8 +34,24 @@ type event struct {
 	Text string    `json:"text"`
 }
 
+// msgEvent is one RPC, numbered so the browser can ask for "everything
+// after seq N".
+type msgEvent struct {
+	Seq     uint64 `json:"seq"`
+	From    int    `json:"from"`
+	To      int    `json:"to"`
+	Kind    string `json:"kind"`
+	Outcome string `json:"outcome"`
+}
+
+const msgRing = 2000
+
 type app struct {
 	c *sim.Cluster
+
+	msgMu  sync.Mutex
+	msgs   []msgEvent // ring buffer of the latest messages
+	msgSeq uint64
 
 	mu         sync.Mutex
 	events     []event
@@ -130,6 +148,35 @@ func (a *app) watch() {
 	}
 }
 
+func (a *app) recordMessage(m memnet.Message) {
+	a.msgMu.Lock()
+	defer a.msgMu.Unlock()
+	a.msgSeq++
+	ev := msgEvent{Seq: a.msgSeq, From: m.From, To: m.To, Kind: m.Kind, Outcome: m.Outcome}
+	if len(a.msgs) < msgRing {
+		a.msgs = append(a.msgs, ev)
+	} else {
+		a.msgs[(a.msgSeq-1)%msgRing] = ev
+	}
+}
+
+// messagesSince returns messages after seq, at most limit of the newest.
+func (a *app) messagesSince(seq uint64, limit int) ([]msgEvent, uint64) {
+	a.msgMu.Lock()
+	defer a.msgMu.Unlock()
+	var out []msgEvent
+	for _, m := range a.msgs {
+		if m.Seq > seq {
+			out = append(out, m)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	if len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out, a.msgSeq
+}
+
 type stateResp struct {
 	Nodes      []sim.NodeStatus `json:"nodes"`
 	Events     []event          `json:"events"`
@@ -142,6 +189,8 @@ type stateResp struct {
 	Paused     bool             `json:"paused"`
 	RPCs       uint64           `json:"rpcs"`
 	Links      [][]bool         `json:"links"` // links[i][j]: can i reach j
+	Messages   []msgEvent       `json:"messages"`
+	MsgSeq     uint64           `json:"msgSeq"`
 }
 
 func (a *app) state() stateResp {
@@ -169,6 +218,12 @@ func (a *app) state() stateResp {
 		P50Micros: p50, P99Micros: p99, Unreliable: a.unreliable, Paused: a.paused,
 		RPCs: a.c.Net.RPCCount(), Links: links,
 	}
+}
+
+func (a *app) stateWithMessages(since uint64) stateResp {
+	s := a.state()
+	s.Messages, s.MsgSeq = a.messagesSince(since, 400)
+	return s
 }
 
 func sortDurations(d []time.Duration) {
@@ -263,6 +318,7 @@ func main() {
 		HeartbeatInterval: time.Duration(float64(30*time.Millisecond) * *slow),
 	})
 	a := &app{c: c, lastLeader: raft.None}
+	c.Net.SetTracer(a.recordMessage)
 	a.logEvent("info", "started %d-node cluster", *nodes)
 	go a.watch()
 	a.workload(*clients)
@@ -272,7 +328,8 @@ func main() {
 	mux.Handle("GET /", http.FileServerFS(static))
 	mux.HandleFunc("GET /api/state", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(a.state())
+		since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
+		_ = json.NewEncoder(w).Encode(a.stateWithMessages(since))
 	})
 	mux.HandleFunc("POST /api/{action}", a.action)
 	log.Printf("kvsim: %d nodes, visualizer at http://%s", *nodes, *addr)
