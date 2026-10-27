@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: vet
+        run: go vet ./...
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: test (race detector)
+        run: go test -race -count=1 ./...
+
+  chaos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: 30 randomized fault-injection runs
+        run: go run ./cmd/kvchaos -runs 30 -duration 3s -viz-dir /tmp
+      - name: the checker catches deliberately broken reads
+        run: |
+          if go run ./cmd/kvchaos -runs 3 -duration 2s -unsafe-reads -viz-dir /tmp; then
+            echo "expected linearizability violations with -unsafe-reads"; exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: failing-histories
+          path: /tmp/kvchaos-*.html
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build image
+        run: docker build -t kvraft .

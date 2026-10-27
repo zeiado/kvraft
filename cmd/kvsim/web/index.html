@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kvraft · live cluster</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --leader: #f2cc60; --candidate: #f0883e; --follower: #58a6ff; --down: #484f58;
+    --ok: #3fb950; --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: baseline; gap: 12px; padding: 18px 24px 6px; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 20px; letter-spacing: .2px; }
+  header .sub { color: var(--muted); }
+  main { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(300px, 1fr); gap: 16px; padding: 12px 24px 24px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 12px 16px; } header { padding: 16px 16px 4px; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .panel h2 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+  svg { width: 100%; height: auto; display: block; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
+  .stat { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .stat .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  button { background: #21262d; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 11px; font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button.danger { color: #ffa198; }
+  button.good { color: #7ee787; }
+  button.on { background: #3d1d1d; border-color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td .mini { padding: 2px 7px; font-size: 12px; }
+  .role { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .events { list-style: none; margin: 0; padding: 0; max-height: 330px; overflow: auto; font-size: 13px; }
+  .events li { padding: 4px 0; border-bottom: 1px dashed var(--line); display: flex; gap: 8px; }
+  .events time { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+  .k-leader { color: var(--leader); } .k-fault { color: #ffa198; } .k-heal { color: #7ee787; }
+  .logbar { display: flex; height: 8px; width: 140px; background: var(--bg); border-radius: 3px; overflow: hidden; border: 1px solid var(--line); }
+  .logbar span { display: block; height: 100%; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .scroll { overflow-x: auto; }
+  .side { display: grid; gap: 16px; align-content: start; }
+</style>
+</head>
+<body>
+<header>
+  <h1>kvraft</h1>
+  <span class="sub">Raft-replicated key-value store · live simulation</span>
+  <span id="offline" hidden style="color:var(--bad);font-weight:600">● disconnected from kvsim — showing last known state</span>
+</header>
+<main>
+  <section class="panel">
+    <h2>Cluster</h2>
+    <svg id="ring" viewBox="0 0 520 380" role="img" aria-label="Cluster diagram"></svg>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--leader)"></i> leader</span>
+      <span><i class="dot" style="background:var(--candidate)"></i> candidate</span>
+      <span><i class="dot" style="background:var(--follower)"></i> follower</span>
+      <span><i class="dot" style="background:var(--down)"></i> crashed</span>
+      <span>── link up &nbsp; ┄┄ partitioned</span>
+    </div>
+    <div class="controls">
+      <button class="danger" data-act="kill-leader">Crash leader</button>
+      <button class="danger" data-act="partition">Random partition</button>
+      <button class="danger" data-act="split-no-quorum">Split (no majority)</button>
+      <button class="danger" id="unrel" data-act="unreliable">Lossy network</button>
+      <button class="good" data-act="heal">Heal everything</button>
+    </div>
+    <div class="scroll" style="margin-top:14px">
+      <table>
+        <thead><tr><th>Node</th><th>Role</th><th>Term</th><th>Commit</th><th>Log</th><th>Keys</th><th></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+  <div class="side">
+    <section class="panel">
+      <h2>Client traffic</h2>
+      <div class="stats">
+        <div class="stat"><div class="v" id="rate">0</div><div class="k">ops/s</div></div>
+        <div class="stat"><div class="v" id="p50">–</div><div class="k">p50</div></div>
+        <div class="stat"><div class="v" id="p99">–</div><div class="k">p99</div></div>
+        <div class="stat"><div class="v" id="fail">0</div><div class="k">timeouts</div></div>
+      </div>
+      <svg id="spark" viewBox="0 0 300 70" preserveAspectRatio="none" aria-label="Throughput over time"></svg>
+    </section>
+    <section class="panel">
+      <h2>Events</h2>
+      <ul class="events" id="events"></ul>
+    </section>
+  </div>
+</main>
+<script>
+const color = { leader: 'var(--leader)', candidate: 'var(--candidate)', follower: 'var(--follower)' };
+const $ = id => document.getElementById(id);
+const NS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs, text) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+async function act(name, id) {
+  await fetch('/api/' + name + (id !== undefined ? '?id=' + id : ''), { method: 'POST' });
+  tick();
+}
+document.querySelectorAll('[data-act]').forEach(b => b.onclick = () => act(b.dataset.act));
+
+function fmtMicros(us) {
+  if (us < 0) return '–';
+  if (us < 1) return '<1µs';
+  return us < 1000 ? us + 'µs' : (us / 1000).toFixed(us < 10000 ? 1 : 0) + 'ms';
+}
+
+function drawRing(s) {
+  const svg = $('ring'); svg.replaceChildren();
+  const n = s.nodes.length, cx = 260, cy = 185, R = 135;
+  const pos = s.nodes.map((_, i) => {
+    const a = -Math.PI / 2 + i * 2 * Math.PI / n;
+    return [cx + R * Math.cos(a), cy + R * Math.sin(a)];
+  });
+  const leader = s.nodes.find(x => x.alive && x.role === 'leader');
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    const up = s.links[i][j] && s.links[j][i];
+    const alive = s.nodes[i].alive && s.nodes[j].alive;
+    if (!alive) continue;
+    const isLeaderLink = leader && up && (i === leader.id || j === leader.id);
+    svg.append(el('line', {
+      x1: pos[i][0], y1: pos[i][1], x2: pos[j][0], y2: pos[j][1],
+      stroke: up ? (isLeaderLink ? '#f2cc60' : '#30363d') : '#f85149',
+      'stroke-width': isLeaderLink ? 2 : 1.2,
+      'stroke-dasharray': up ? (isLeaderLink ? '6 6' : '') : '3 5',
+      'stroke-opacity': up ? (isLeaderLink ? .75 : 1) : .55,
+      class: isLeaderLink ? 'hb' : ''
+    }));
+  }
+  s.nodes.forEach((node, i) => {
+    const [x, y] = pos[i];
+    const fill = node.alive ? color[node.role] : 'var(--down)';
+    const g = el('g', { style: 'cursor:pointer' });
+    g.onclick = () => act(node.alive ? 'kill' : 'restart', node.id);
+    if (node.alive && node.role === 'leader') g.append(el('circle', { cx: x, cy: y, r: 40, fill: 'none', stroke: fill, 'stroke-opacity': .35, 'stroke-width': 6 }));
+    g.append(el('circle', { cx: x, cy: y, r: 32, fill: '#0d1117', stroke: fill, 'stroke-width': 3 }));
+    g.append(el('text', { x, y: y - 3, 'text-anchor': 'middle', fill: '#e6edf3', 'font-size': 17, 'font-weight': 600 }, 'n' + node.id));
+    g.append(el('text', { x, y: y + 15, 'text-anchor': 'middle', fill: '#8b949e', 'font-size': 11 }, node.alive ? 'term ' + node.term : 'down'));
+    const t = el('title', {}, node.alive ? 'Click to crash node ' + node.id : 'Click to restart node ' + node.id);
+    g.append(t);
+    svg.append(g);
+  });
+  const status = leader ? `leader: n${leader.id} · term ${leader.term}` : 'no leader — writes are blocked';
+  svg.append(el('text', { x: cx, y: cy + 5, 'text-anchor': 'middle', fill: leader ? '#8b949e' : '#f85149', 'font-size': 13 }, status));
+}
+
+function drawRows(s) {
+  const maxLog = Math.max(1, ...s.nodes.map(x => x.lastLogIndex));
+  const rows = s.nodes.map(x => {
+    const tr = document.createElement('tr');
+    const roleColor = x.alive ? color[x.role] : 'var(--down)';
+    const snapW = 100 * x.snapshotIndex / maxLog;
+    const commitW = 100 * (x.commitIndex - x.snapshotIndex) / maxLog;
+    const tailW = 100 * (x.lastLogIndex - x.commitIndex) / maxLog;
+    tr.innerHTML = `
+      <td>n${x.id}${x.group && x.alive ? ` <span style="color:var(--muted)">· grp ${x.group > 0 ? x.group : 'alone'}</span>` : ''}</td>
+      <td><span class="role"><i class="dot" style="background:${roleColor}"></i>${x.alive ? x.role : 'crashed'}</span></td>
+      <td>${x.term}</td>
+      <td>${x.alive ? x.commitIndex : '–'}</td>
+      <td title="snapshot ${x.snapshotIndex} · committed ${x.commitIndex} · last ${x.lastLogIndex}">
+        <div class="logbar"><span style="width:${snapW}%;background:#6e40c9"></span><span style="width:${commitW}%;background:#3fb950"></span><span style="width:${tailW}%;background:#f0883e"></span></div></td>
+      <td>${x.alive ? x.keys : '–'}</td>
+      <td></td>`;
+    const cell = tr.lastElementChild;
+    const mk = (label, a, cls) => { const b = document.createElement('button'); b.className = 'mini ' + cls; b.textContent = label; b.onclick = () => act(a, x.id); cell.append(b, ' '); };
+    if (x.alive) { mk('crash', 'kill', 'danger'); mk('isolate', 'isolate', 'danger'); }
+    else mk('restart', 'restart', 'good');
+    return tr;
+  });
+  $('rows').replaceChildren(...rows);
+}
+
+function drawSpark(hist) {
+  const svg = $('spark'); svg.replaceChildren();
+  if (hist.length < 2) return;
+  const max = Math.max(4, ...hist), w = 300, h = 70;
+  const pts = hist.map((v, i) => [i * w / (hist.length - 1), h - 4 - (v / max) * (h - 10)]);
+  const d = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+  svg.append(el('path', { d: d + ` L${w} ${h} L0 ${h} Z`, fill: 'rgba(63,185,80,.15)' }));
+  svg.append(el('path', { d, fill: 'none', stroke: '#3fb950', 'stroke-width': 1.6, 'vector-effect': 'non-scaling-stroke' }));
+}
+
+function drawEvents(evts) {
+  const items = evts.slice().reverse().map(e => {
+    const li = document.createElement('li');
+    const t = new Date(e.at);
+    li.innerHTML = `<time>${t.toLocaleTimeString([], { hour12: false })}</time><span class="k-${e.kind}"></span>`;
+    li.lastElementChild.textContent = e.text;
+    return li;
+  });
+  $('events').replaceChildren(...items);
+}
+
+let dash = 0;
+async function tick() {
+  try {
+    const s = await (await fetch('/api/state')).json();
+    drawRing(s); drawRows(s); drawSpark(s.opsHistory); drawEvents(s.events);
+    const last4 = s.opsHistory.slice(-4).reduce((a, b) => a + b, 0);
+    $('rate').textContent = last4;
+    $('p50').textContent = fmtMicros(s.p50Micros);
+    $('p99').textContent = fmtMicros(s.p99Micros);
+    $('fail').textContent = s.failedOps;
+    $('unrel').classList.toggle('on', s.unreliable);
+    $('offline').hidden = true;
+  } catch (e) {
+    $('offline').hidden = false;
+  }
+}
+setInterval(tick, 250);
+tick();
+// Animate heartbeat links.
+(function anim() {
+  dash = (dash - 0.6) % 12;
+  document.querySelectorAll('line.hb').forEach(l => l.setAttribute('stroke-dashoffset', dash));
+  requestAnimationFrame(anim);
+})();
+</script>
+</body>
+</html>

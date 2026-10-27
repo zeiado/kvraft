@@ -1,0 +1,49 @@
+# A 5-node kvraft cluster.
+#
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#   go run ./cmd/kvctl status
+#   docker compose -f deploy/docker-compose.yml kill node2     # crash a node
+#   docker compose -f deploy/docker-compose.yml start node2    # bring it back
+#
+# Node i is published on localhost:800(i+1).
+
+x-node: &node
+  build:
+    context: ..
+  restart: "no"
+
+x-peers: &peers "0=http://node0:8080,1=http://node1:8080,2=http://node2:8080,3=http://node3:8080,4=http://node4:8080"
+
+services:
+  node0:
+    <<: *node
+    command: ["-id", "0", "-peers", *peers, "-listen", ":8080", "-data", "/data"]
+    ports: ["8001:8080"]
+    volumes: ["node0:/data"]
+  node1:
+    <<: *node
+    command: ["-id", "1", "-peers", *peers, "-listen", ":8080", "-data", "/data"]
+    ports: ["8002:8080"]
+    volumes: ["node1:/data"]
+  node2:
+    <<: *node
+    command: ["-id", "2", "-peers", *peers, "-listen", ":8080", "-data", "/data"]
+    ports: ["8003:8080"]
+    volumes: ["node2:/data"]
+  node3:
+    <<: *node
+    command: ["-id", "3", "-peers", *peers, "-listen", ":8080", "-data", "/data"]
+    ports: ["8004:8080"]
+    volumes: ["node3:/data"]
+  node4:
+    <<: *node
+    command: ["-id", "4", "-peers", *peers, "-listen", ":8080", "-data", "/data"]
+    ports: ["8005:8080"]
+    volumes: ["node4:/data"]
+
+volumes:
+  node0:
+  node1:
+  node2:
+  node3:
+  node4:
